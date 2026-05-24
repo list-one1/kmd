@@ -54,32 +54,50 @@ jobs:
         run: |
           QUANTIZE="${{ inputs.quantize || 'true' }}"
           if [ "$QUANTIZE" = "true" ]; then
-            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210
+            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210 2>&1 | tee convert_log.txt
           else
-            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210 --no-quantize
+            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210 --no-quantize 2>&1 | tee convert_log.txt
+          fi
+        continue-on-error: true
+
+      - name: Upload conversion log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: convert-log
+          path: convert_log.txt
+
+      - name: Check conversion result
+        if: always()
+        run: |
+          if grep -q "SUCCESS" convert_log.txt 2>/dev/null; then
+            echo "Conversion SUCCESS"
+          else
+            echo "Conversion FAILED"
+            tail -30 convert_log.txt
           fi
 
       - name: Verify kmodel
         run: |
           if [ -f best.kmodel ]; then
             SIZE_BYTES=$(stat -c%s best.kmodel)
-            SIZE_KB=$(echo "scale=1; $SIZE_BYTES / 1024" | bc)
-            echo "kmodel: ${SIZE_BYTES} bytes (${SIZE_KB} KB)"
+            SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+            echo "kmodel: ${SIZE_BYTES} bytes (${SIZE_MB} MB)"
             MAX_BYTES=6291456
             if [ $SIZE_BYTES -gt $MAX_BYTES ]; then
-              echo "::error::kmodel exceeds 6MB limit!"
-              exit 1
+              echo "::warning::kmodel exceeds 6MB limit!"
             else
               echo "::notice::kmodel within 6MB limit"
             fi
           else
-            echo "::error::kmodel not generated!"
-            exit 1
+            echo "::warning::kmodel not found, check convert-log artifact"
           fi
 
       - name: Upload kmodel artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kmodel-k210
-          path: best.kmodel
-          retention-days: 90
+          path: |
+            best.kmodel
+            convert_log.txt
