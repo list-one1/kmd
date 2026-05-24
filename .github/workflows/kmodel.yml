@@ -1,0 +1,86 @@
+name: Convert ONNX to K210 kmodel
+
+on:
+  push:
+    paths:
+      - "best.onnx"
+      - "convert_kmodel.py"
+      - ".github/workflows/kmodel.yml"
+  workflow_dispatch:
+    inputs:
+      input_size:
+        description: "Input size"
+        default: "320"
+      quantize:
+        description: "INT8 quantization"
+        default: "true"
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install nncase onnx onnxruntime numpy
+
+      - name: Convert ONNX to kmodel
+        run: |
+          INPUT_SIZE="${{ inputs.input_size || '320' }}"
+          QUANTIZE="${{ inputs.quantize || 'true' }}"
+
+          echo "=== K210 kmodel Conversion ==="
+          echo "Input size: ${INPUT_SIZE}x${INPUT_SIZE}"
+          echo "Quantize: ${QUANTIZE}"
+
+          if [ "$QUANTIZE" = "true" ]; then
+            python convert_kmodel.py \
+              --input best.onnx \
+              --output best.kmodel \
+              --target k210 \
+              --input-size ${INPUT_SIZE}
+          else
+            python convert_kmodel.py \
+              --input best.onnx \
+              --output best.kmodel \
+              --target k210 \
+              --input-size ${INPUT_SIZE} \
+              --no-quantize
+          fi
+
+      - name: Check kmodel size
+        run: |
+          if [ -f best.kmodel ]; then
+            SIZE_KB=$(stat -c%s best.kmodel 2>/dev/null || echo 0)
+            SIZE_MB=$(echo "scale=2; $SIZE_KB / 1048576" | bc 2>/dev/null || echo "N/A")
+            echo "kmodel size: ${SIZE_KB} bytes (${SIZE_MB} MB)"
+
+            if [ $SIZE_KB -gt 6291456 ]; then
+              echo "::warning::kmodel exceeds 6MB limit!"
+            else
+              echo "✓ kmodel within 6MB limit"
+            fi
+          else
+            echo "ERROR: kmodel not generated"
+            exit 1
+          fi
+
+      - name: Upload kmodel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmodel
+          path: |
+            best.kmodel
+          retention-days: 90
