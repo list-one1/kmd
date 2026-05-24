@@ -1,15 +1,16 @@
-name: Convert ONNX to K210 kmodel
+name: Convert YOLOv2 ONNX to K210 kmodel
 
 on:
   push:
     paths:
+      - "best.onnx"
       - "convert_kmodel.py"
       - ".github/workflows/kmodel.yml"
   workflow_dispatch:
     inputs:
       input_size:
-        description: "Input size (224/320/640)"
-        default: "320"
+        description: "Input size (px)"
+        default: "215"
       quantize:
         description: "INT8 quantization"
         default: "true"
@@ -30,42 +31,36 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Download ONNX model
-        run: |
-          echo "Downloading ONNX from maixcam-convert repo..."
-          curl -L -o best.onnx \
-            "https://raw.githubusercontent.com/list-one1/maixcam-convert/main/best.onnx" \
-            || curl -L -o best.onnx \
-            "https://github.com/list-one1/maixcam-convert/raw/main/best.onnx" \
-            || wget -O best.onnx \
-            "https://raw.githubusercontent.com/list-one1/maixcam-convert/main/best.onnx"
-
-          echo "ONNX size: $(stat -c%s best.onnx) bytes"
-
-          # Verify it's a valid ONNX (not LFS pointer)
-          python3 -c "
-          data = open('best.onnx', 'rb').read(100)
-          if data.startswith(b'version https://git-lfs'):
-              print('ERROR: Got LFS pointer, checking out LFS file')
-              import os
-              os.system('git lfs pull --include=best.onnx')
-          else:
-              print('ONNX file looks valid')
-          "
-
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install nncase onnx onnxruntime numpy
 
-      - name: Convert ONNX to kmodel
+      - name: Inspect model
         run: |
-          INPUT_SIZE="${{ inputs.input_size || '320' }}"
+          python3 -c "
+          import onnx, os
+          m = onnx.load('best.onnx')
+          print(f'Size: {os.path.getsize(\"best.onnx\")/1024:.0f} KB')
+          for i in m.graph.input:
+              s = [d.dim_value for d in i.type.tensor_type.shape.dim]
+              print(f'Input: {i.name} shape={s}')
+          for o in m.graph.output:
+              s = [d.dim_value for d in o.type.tensor_type.shape.dim]
+              print(f'Output: {o.name} shape={s}')
+          from collections import Counter
+          ops = Counter([n.op_type for n in m.graph.node])
+          print(f'Nodes: {len(m.graph.node)}')
+          print(f'Ops: {dict(ops)}')
+          "
+
+      - name: Convert to kmodel
+        run: |
+          INPUT_SIZE="${{ inputs.input_size || '215' }}"
           QUANTIZE="${{ inputs.quantize || 'true' }}"
 
-          echo "=== K210 kmodel Conversion ==="
-          echo "Input size: ${INPUT_SIZE}x${INPUT_SIZE}"
-          echo "Quantize: ${QUANTIZE}"
+          echo "=== YOLOv2 -> K210 kmodel ==="
+          echo "Input: ${INPUT_SIZE}x${INPUT_SIZE}"
 
           if [ "$QUANTIZE" = "true" ]; then
             python convert_kmodel.py \
@@ -85,23 +80,25 @@ jobs:
       - name: Verify kmodel
         run: |
           if [ -f best.kmodel ]; then
-            SIZE_KB=$(stat -c%s best.kmodel)
-            SIZE_MB=$(echo "scale=2; $SIZE_KB / 1048576" | bc)
-            echo "kmodel size: ${SIZE_KB} bytes (${SIZE_MB} MB)"
-            if [ $SIZE_KB -gt 6291456 ]; then
-              echo "::warning::kmodel exceeds 6MB limit!"
+            SIZE_BYTES=$(stat -c%s best.kmodel)
+            SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+            echo "kmodel: ${SIZE_BYTES} bytes (${SIZE_MB} MB)"
+
+            MAX_BYTES=6291456
+            if [ $SIZE_BYTES -gt $MAX_BYTES ]; then
+              echo "::error::kmodel ${SIZE_MB}MB exceeds 6MB limit!"
+              exit 1
             else
-              echo "::notice:: kmodel within 6MB limit"
+              echo "::notice:: kmodel ${SIZE_MB}MB - within 6MB limit"
             fi
           else
-            echo "ERROR: kmodel not generated"
+            echo "::error::kmodel not generated!"
             exit 1
           fi
 
-      - name: Upload kmodel artifact
+      - name: Upload kmodel
         uses: actions/upload-artifact@v4
         with:
-          name: kmodel
-          path: |
-            best.kmodel
+          name: kmodel-k210
+          path: best.kmodel
           retention-days: 90
