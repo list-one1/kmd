@@ -28,11 +28,16 @@ def convert_onnx_to_kmodel(onnx_path, kmodel_path, target="k210", quantize=True)
     print("\n  Running shape inference...")
     import onnx as onnx_lib
     onnx_model = onnx_lib.load(str(onnx_path))
+
     try:
         onnx_model = onnx_lib.shape_inference.infer_shapes(onnx_model)
         print(f"  Shape inference OK ({len(onnx_model.graph.value_info)} value_info entries)")
+    except Exception as e:
+        print(f"  Shape inference failed: {e}")
+        onnx_model = None
 
-        # Optionally run onnx-simplifier if available
+    if onnx_model is not None:
+        # Try onnxsim, but don't fail if it errors
         try:
             import onnxsim
             input_shapes = {}
@@ -46,16 +51,15 @@ def convert_onnx_to_kmodel(onnx_path, kmodel_path, target="k210", quantize=True)
             print(f"  ONNX simplify: {'OK' if check else 'validation failed'}")
         except ImportError:
             print("  onnxsim not available, using shape inference only")
+        except Exception as e:
+            print(f"  ONNX simplify skipped: {e}")
 
-        temp_path = onnx_path.parent / (onnx_path.stem + "_fixed.onnx")
-        onnx_lib.save(onnx_model, str(temp_path))
         onnx_data = onnx_model.SerializeToString()
-        print(f"  Fixed ONNX: {len(onnx_data) / 1024:.1f} KB")
-    except Exception as e:
-        print(f"  Shape inference failed: {e}, using original ONNX")
+        print(f"  ONNX size: {len(onnx_data) / 1024:.1f} KB")
+    else:
         with open(str(onnx_path), "rb") as f:
             onnx_data = f.read()
-    print(f"  ONNX size: {len(onnx_data) / 1024:.1f} KB")
+        print(f"  ONNX size: {len(onnx_data) / 1024:.1f} KB (original)")
 
     # Minimal CompileOptions — nncase auto-detects from ONNX
     print("\n  Setting up CompileOptions...")
