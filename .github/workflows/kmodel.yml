@@ -36,6 +36,17 @@ jobs:
           pip install --upgrade pip
           pip install nncase==1.9.0.20230322 onnx onnxruntime numpy
 
+      - name: Debug nncase API
+        run: |
+          python3 -c "
+          import nncase
+          print(f'nncase version: {nncase.__version__}')
+          print(f'CompileOptions: {dir(nncase.CompileOptions())}')
+          print(f'ImportOptions: {dir(nncase.ImportOptions())}')
+          print(f'PTQTensorOptions: {dir(nncase.PTQTensorOptions())}')
+          print(f'Compiler methods: {[m for m in dir(nncase.Compiler) if not m.startswith(\"_\")]}')
+          "
+
       - name: Inspect model
         run: |
           python3 -c "
@@ -56,6 +67,7 @@ jobs:
 
       - name: Convert to kmodel
         run: |
+          set -x
           INPUT_SIZE="${{ inputs.input_size || '215' }}"
           QUANTIZE="${{ inputs.quantize || 'true' }}"
 
