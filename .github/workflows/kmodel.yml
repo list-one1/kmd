@@ -3,13 +3,12 @@ name: Convert ONNX to K210 kmodel
 on:
   push:
     paths:
-      - "best.onnx"
       - "convert_kmodel.py"
       - ".github/workflows/kmodel.yml"
   workflow_dispatch:
     inputs:
       input_size:
-        description: "Input size"
+        description: "Input size (224/320/640)"
         default: "320"
       quantize:
         description: "INT8 quantization"
@@ -30,6 +29,29 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
+      - name: Download ONNX model
+        run: |
+          echo "Downloading ONNX from maixcam-convert repo..."
+          curl -L -o best.onnx \
+            "https://raw.githubusercontent.com/list-one1/maixcam-convert/main/best.onnx" \
+            || curl -L -o best.onnx \
+            "https://github.com/list-one1/maixcam-convert/raw/main/best.onnx" \
+            || wget -O best.onnx \
+            "https://raw.githubusercontent.com/list-one1/maixcam-convert/main/best.onnx"
+
+          echo "ONNX size: $(stat -c%s best.onnx) bytes"
+
+          # Verify it's a valid ONNX (not LFS pointer)
+          python3 -c "
+          data = open('best.onnx', 'rb').read(100)
+          if data.startswith(b'version https://git-lfs'):
+              print('ERROR: Got LFS pointer, checking out LFS file')
+              import os
+              os.system('git lfs pull --include=best.onnx')
+          else:
+              print('ONNX file looks valid')
+          "
 
       - name: Install dependencies
         run: |
@@ -60,17 +82,16 @@ jobs:
               --no-quantize
           fi
 
-      - name: Check kmodel size
+      - name: Verify kmodel
         run: |
           if [ -f best.kmodel ]; then
-            SIZE_KB=$(stat -c%s best.kmodel 2>/dev/null || echo 0)
-            SIZE_MB=$(echo "scale=2; $SIZE_KB / 1048576" | bc 2>/dev/null || echo "N/A")
+            SIZE_KB=$(stat -c%s best.kmodel)
+            SIZE_MB=$(echo "scale=2; $SIZE_KB / 1048576" | bc)
             echo "kmodel size: ${SIZE_KB} bytes (${SIZE_MB} MB)"
-
             if [ $SIZE_KB -gt 6291456 ]; then
               echo "::warning::kmodel exceeds 6MB limit!"
             else
-              echo "✓ kmodel within 6MB limit"
+              echo "::notice:: kmodel within 6MB limit"
             fi
           else
             echo "ERROR: kmodel not generated"
