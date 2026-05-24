@@ -67,37 +67,25 @@ jobs:
           name: convert-log
           path: convert_log.txt
 
-      - name: Check conversion result
-        if: always()
+      - name: Verify and fail if conversion failed
         run: |
           if grep -q "SUCCESS" convert_log.txt 2>/dev/null; then
-            echo "Conversion SUCCESS"
-          else
-            echo "Conversion FAILED"
-            tail -30 convert_log.txt
-          fi
-
-      - name: Verify kmodel
-        run: |
-          if [ -f best.kmodel ]; then
-            SIZE_BYTES=$(stat -c%s best.kmodel)
-            SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
-            echo "kmodel: ${SIZE_BYTES} bytes (${SIZE_MB} MB)"
-            MAX_BYTES=6291456
-            if [ $SIZE_BYTES -gt $MAX_BYTES ]; then
-              echo "::warning::kmodel exceeds 6MB limit!"
-            else
-              echo "::notice::kmodel within 6MB limit"
+            echo "=== Conversion SUCCESS ==="
+            if [ -f best.kmodel ]; then
+              SIZE_BYTES=$(stat -c%s best.kmodel)
+              SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+              echo "kmodel: ${SIZE_BYTES} bytes (${SIZE_MB} MB)"
             fi
           else
-            echo "::warning::kmodel not found, check convert-log artifact"
+            echo "=== Conversion FAILED ==="
+            echo "Last 40 lines of log:"
+            tail -40 convert_log.txt
+            exit 1
           fi
 
       - name: Upload kmodel artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kmodel-k210
-          path: |
-            best.kmodel
-            convert_log.txt
+          path: best.kmodel
+          retention-days: 90
