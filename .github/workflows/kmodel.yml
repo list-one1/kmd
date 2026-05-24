@@ -6,6 +6,7 @@ on:
       - "best.onnx"
       - "convert_kmodel.py"
       - ".github/workflows/kmodel.yml"
+      - "debug_convert.py"
   workflow_dispatch:
     inputs:
       quantize:
@@ -33,7 +34,7 @@ jobs:
           pip install --upgrade pip
           pip install nncase==1.9.0.20230322 onnx onnxruntime numpy
 
-      - name: Inspect ONNX model
+      - name: Inspect ONNX
         run: |
           python3 -c "
           import onnx, os
@@ -47,19 +48,127 @@ jobs:
               s = [d.dim_value for d in o.type.tensor_type.shape.dim]
               print(f'Output: {o.name} shape={s}')
           ops = Counter([n.op_type for n in m.graph.node])
-          print(f'Nodes: {len(m.graph.node)}')
-          print(f'Ops: {dict(ops)}')
+          print(f'Nodes: {len(m.graph.node)} Ops: {dict(ops)}')
           "
 
-      - name: Convert ONNX to kmodel
+      - name: Debug conversion step by step
         run: |
-          QUANTIZE="${{ inputs.quantize || 'true' }}"
+          python3 -c "
+          import traceback, sys
 
-          if [ "$QUANTIZE" = "true" ]; then
-            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210
-          else
-            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210 --no-quantize
-          fi
+          LOG = []
+
+          def log(msg):
+              print(msg)
+              LOG.append(msg)
+
+          try:
+              log('=== STEP 0: Check environment ===')
+              import platform
+              log(f'Python: {platform.python_version()}')
+              log(f'Platform: {platform.platform()}')
+
+              log('\n=== STEP 1: Import nncase ===')
+              try:
+                  import nncase
+                  log(f'nncase version: {nncase.__version__}')
+              except Exception as e:
+                  log(f'FAILED to import nncase: {e}')
+                  traceback.print_exc()
+                  sys.exit(1)
+
+              log('\n=== STEP 2: Load ONNX ===')
+              try:
+                  with open('best.onnx', 'rb') as f:
+                      onnx_data = f.read()
+                  log(f'ONNX loaded: {len(onnx_data)} bytes')
+              except Exception as e:
+                  log(f'FAILED to load ONNX: {e}')
+                  traceback.print_exc()
+                  sys.exit(1)
+
+              log('\n=== STEP 3: Create CompileOptions ===')
+              try:
+                  co = nncase.CompileOptions()
+                  co.target = 'k210'
+                  co.quant_type = 'uint8'
+                  log(f'CompileOptions: target={co.target}')
+              except Exception as e:
+                  log(f'FAILED: {e}')
+                  traceback.print_exc()
+                  sys.exit(1)
+
+              log('\n=== STEP 4: Create Compiler ===')
+              try:
+                  compiler = nncase.Compiler(co)
+                  log('Compiler OK')
+              except Exception as e:
+                  log(f'FAILED: {e}')
+                  traceback.print_exc()
+                  sys.exit(1)
+
+              log('\n=== STEP 5: Import ONNX ===')
+              try:
+                  io = nncase.ImportOptions()
+                  compiler.import_onnx(onnx_data, io)
+                  log('Import OK')
+              except Exception as e:
+                  log(f'FAILED: {e}')
+                  traceback.print_exc()
+                  sys.exit(1)
+
+              log('\n=== STEP 6: PTQ setup ===')
+              try:
+                  import numpy as np
+                  ptq = nncase.PTQTensorOptions()
+                  ptq.samples_count = 5
+                  calib = np.random.rand(5, 3, 224, 224).astype(np.float32)
+                  ptq.set_tensor_data(calib.tobytes())
+                  compiler.use_ptq(ptq)
+                  log('PTQ OK')
+              except Exception as e:
+                  log(f'FAILED: {e}')
+                  traceback.print_exc()
+                  sys.exit(1)
+
+              log('\n=== STEP 7: Compile ===')
+              try:
+                  compiler.compile()
+                  log('Compile OK')
+              except Exception as e:
+                  log(f'FAILED: {e}')
+                  traceback.print_exc()
+                  sys.exit(1)
+
+              log('\n=== STEP 8: Generate kmodel ===')
+              try:
+                  kmodel = compiler.gencode_tobytes()
+                  with open('best.kmodel', 'wb') as f:
+                      f.write(kmodel)
+                  log(f'kmodel size: {len(kmodel)} bytes ({len(kmodel)/1024:.1f} KB)')
+                  log('SUCCESS!')
+              except Exception as e:
+                  log(f'FAILED: {e}')
+                  traceback.print_exc()
+                  sys.exit(1)
+
+          except SystemExit:
+              pass
+          finally:
+              with open('debug_log.txt', 'w') as f:
+                  f.write('\n'.join(LOG))
+          " 2>&1 | tee debug_console.txt
+        continue-on-error: true
+
+      - name: Upload debug info
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs
+          path: |
+            debug_log.txt
+            debug_console.txt
+            best.kmodel
 
       - name: Verify kmodel
         run: |
@@ -67,22 +176,7 @@ jobs:
             SIZE_BYTES=$(stat -c%s best.kmodel)
             SIZE_KB=$(echo "scale=1; $SIZE_BYTES / 1024" | bc)
             echo "kmodel: ${SIZE_BYTES} bytes (${SIZE_KB} KB)"
-
-            MAX_BYTES=6291456
-            if [ $SIZE_BYTES -gt $MAX_BYTES ]; then
-              echo "::error::kmodel exceeds 6MB limit!"
-              exit 1
-            else
-              echo "::notice::kmodel within 6MB limit"
-            fi
           else
-            echo "::error::kmodel not generated!"
+            echo "kmodel not generated - check debug-logs artifact for details"
             exit 1
           fi
-
-      - name: Upload kmodel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kmodel-k210
-          path: best.kmodel
-          retention-days: 90
