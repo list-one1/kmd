@@ -2,53 +2,15 @@
 """
 YOLO ONNX → K210 kmodel converter using nncase 1.x API.
 
-Based on the working pytorch-k210 conversion pipeline.
-Requires: nncase==1.9.0.20230322, onnxsim, onnx
+Based on pytorch-k210 proven pipeline.
+Requires: nncase==1.9.0.20230322
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
 import numpy as np
-
-
-def simplify_onnx(onnx_path):
-    """Run ONNX shape inference + simplifier to make model nncase-compatible."""
-    import onnx
-    import onnxsim
-
-    print("  Running ONNX simplification...")
-    onnx_model = onnx.load(str(onnx_path))
-
-    # Infer shapes first
-    onnx_model = onnx.shape_inference.infer_shapes(onnx_model)
-
-    # Auto-detect input shapes
-    input_all = [node.name for node in onnx_model.graph.input]
-    input_initializer = [node.name for node in onnx_model.graph.initializer]
-    input_names = list(set(input_all) - set(input_initializer))
-    input_tensors = [node for node in onnx_model.graph.input if node.name in input_names]
-
-    input_shapes = {}
-    for e in input_tensors:
-        onnx_type = e.type.tensor_type
-        shape = []
-        for i, d in enumerate(onnx_type.shape.dim):
-            val = d.dim_value if d.dim_value != 0 else 1
-            shape.append(val)
-        input_shapes[e.name] = shape
-        print(f"  Input: {e.name} shape={shape}")
-
-    onnx_model, check = onnxsim.simplify(onnx_model, input_shapes=input_shapes)
-    if not check:
-        print("  WARNING: ONNX simplification failed validation, continuing anyway")
-
-    simplified_path = onnx_path.parent / (onnx_path.stem + "_simplified.onnx")
-    onnx.save_model(onnx_model, str(simplified_path))
-    print(f"  Simplified: {simplified_path} ({simplified_path.stat().st_size / 1024:.1f} KB)")
-    return simplified_path
 
 
 def convert_onnx_to_kmodel(onnx_path, kmodel_path, target="k210", quantize=True):
@@ -58,54 +20,48 @@ def convert_onnx_to_kmodel(onnx_path, kmodel_path, target="k210", quantize=True)
     print(f"\n{'='*50}")
     print(f"  nncase {nncase.__version__}: ONNX -> {target} kmodel")
     print(f"{'='*50}")
-    print(f"  Input:  {onnx_path}")
-    print(f"  Output: {kmodel_path}")
-    print(f"  Quantize: {'INT8' if quantize else 'FP32'}")
+    print(f"  Input:     {onnx_path}")
+    print(f"  Output:    {kmodel_path}")
+    print(f"  Quantize:  {'INT8' if quantize else 'FP32'}")
 
-    # Step 0: Simplify ONNX
-    simplified_path = simplify_onnx(onnx_path)
-
-    # Read simplified ONNX
-    with open(str(simplified_path), "rb") as f:
+    # Read ONNX
+    with open(str(onnx_path), "rb") as f:
         onnx_data = f.read()
     print(f"  ONNX size: {len(onnx_data) / 1024:.1f} KB")
 
-    # CompileOptions — minimal config, let nncase detect from ONNX
+    # Minimal CompileOptions — nncase auto-detects from ONNX
+    print("\n  Setting up CompileOptions...")
     compile_options = nncase.CompileOptions()
     compile_options.target = target
-    compile_options.dump_ir = False
-    compile_options.dump_asm = False
+    print(f"  target={target}")
 
     if quantize:
         compile_options.quant_type = "uint8"
+        print("  quant_type=uint8")
 
-    # Compiler
-    compiler = nncase.Compiler(compile_options)
-
-    # Import ONNX
+    # Create compiler
     print("\n[1/3] Importing ONNX...")
+    compiler = nncase.Compiler(compile_options)
     import_options = nncase.ImportOptions()
     compiler.import_onnx(onnx_data, import_options)
     print("  Import OK")
 
-    # PTQ calibration
+    # PTQ
     if quantize:
-        print("[2/3] Setting up PTQ quantization...")
+        print("[2/3] Setting up PTQ...")
         ptq_options = nncase.PTQTensorOptions()
         ptq_options.samples_count = 5
-
-        # Use NCHW calibration data matching the ONNX model format
         calib_data = np.random.rand(5, 3, 224, 224).astype(np.float32)
         ptq_options.set_tensor_data(calib_data.tobytes())
         compiler.use_ptq(ptq_options)
-        print("  PTQ setup OK")
+        print("  PTQ OK")
 
     # Compile
     print("[3/3] Compiling...")
     compiler.compile()
     print("  Compile OK")
 
-    # Generate kmodel
+    # Generate
     kmodel = compiler.gencode_tobytes()
     with open(str(kmodel_path), "wb") as f:
         f.write(kmodel)
@@ -151,11 +107,10 @@ def main():
 
     # Size check
     size_mb = kmodel_path.stat().st_size / (1024 * 1024)
+    print(f"PASS: {size_mb:.1f}MB")
     if size_mb > 6.0:
-        print(f"WARNING: kmodel {size_mb:.1f}MB exceeds 6MB limit!")
+        print(f"WARNING: Exceeds 6MB limit!")
         sys.exit(1)
-    else:
-        print(f"PASS: {size_mb:.1f}MB within 6MB limit")
 
 
 if __name__ == "__main__":

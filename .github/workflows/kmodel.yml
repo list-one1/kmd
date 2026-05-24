@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install nncase==1.9.0.20230322 onnxsim onnx onnxruntime numpy
+          pip install nncase==1.9.0.20230322 onnx onnxruntime numpy
 
       - name: Inspect ONNX model
         run: |
@@ -56,9 +56,9 @@ jobs:
           QUANTIZE="${{ inputs.quantize || 'true' }}"
 
           if [ "$QUANTIZE" = "true" ]; then
-            python convert_kmodel.py --input best.onnx --output best.kmodel --target k210
+            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210
           else
-            python convert_kmodel.py --input best.onnx --output best.kmodel --target k210 --no-quantize
+            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210 --no-quantize
           fi
 
       - name: Verify kmodel
