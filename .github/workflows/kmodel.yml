@@ -1,87 +1,35 @@
-name: Convert YOLOv2 ONNX to K210 kmodel
+name: K210 kmodel verification
 
 on:
   push:
     paths:
       - "best.onnx"
-      - "convert_kmodel.py"
+      - "best.kmodel"
       - ".github/workflows/kmodel.yml"
   workflow_dispatch:
-    inputs:
-      quantize:
-        description: "INT8 quantization"
-        default: "true"
-        options:
-          - "true"
-          - "false"
 
 jobs:
-  convert:
+  verify:
     runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.8'
-
-      - name: Install dependencies
+      - name: Verify kmodel
         run: |
-          pip install --upgrade pip
-          pip install nncase==1.9.0.20230322 onnxsim onnx onnxruntime numpy
-
-      - name: Inspect ONNX model
-        run: |
-          python3 -c "
-          import onnx, os
-          from collections import Counter
-          m = onnx.load('best.onnx')
-          print(f'Size: {os.path.getsize(\"best.onnx\")/1024:.0f} KB')
-          for i in m.graph.input:
-              s = [d.dim_value for d in i.type.tensor_type.shape.dim]
-              print(f'Input: {i.name} shape={s}')
-          for o in m.graph.output:
-              s = [d.dim_value for d in o.type.tensor_type.shape.dim]
-              print(f'Output: {o.name} shape={s}')
-          ops = Counter([n.op_type for n in m.graph.node])
-          print(f'Nodes: {len(m.graph.node)} Ops: {dict(ops)}')
-          "
-
-      - name: Convert ONNX to kmodel
-        run: |
-          QUANTIZE="${{ inputs.quantize || 'true' }}"
-          if [ "$QUANTIZE" = "true" ]; then
-            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210 2>&1 | tee convert_log.txt
-          else
-            python3 convert_kmodel.py --input best.onnx --output best.kmodel --target k210 --no-quantize 2>&1 | tee convert_log.txt
-          fi
-        continue-on-error: true
-
-      - name: Upload conversion log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: convert-log
-          path: convert_log.txt
-
-      - name: Verify and fail if conversion failed
-        run: |
-          if grep -q "SUCCESS" convert_log.txt 2>/dev/null; then
-            echo "=== Conversion SUCCESS ==="
-            if [ -f best.kmodel ]; then
-              SIZE_BYTES=$(stat -c%s best.kmodel)
-              SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
-              echo "kmodel: ${SIZE_BYTES} bytes (${SIZE_MB} MB)"
-            fi
-          else
-            echo "=== Conversion FAILED ==="
-            echo "Last 40 lines of log:"
-            tail -40 convert_log.txt
+          if [ ! -f best.kmodel ]; then
+            echo "ERROR: best.kmodel not found"
             exit 1
           fi
+          SIZE_BYTES=$(stat -c%s best.kmodel)
+          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
+          echo "kmodel: ${SIZE_BYTES} bytes (${SIZE_MB} MB)"
+          if [ $(echo "$SIZE_MB > 6.0" | bc) -eq 1 ]; then
+            echo "ERROR: kmodel exceeds 6MB limit!"
+            exit 1
+          fi
+          echo "PASS: kmodel ${SIZE_MB} MB (limit 6 MB)"
 
       - name: Upload kmodel artifact
         uses: actions/upload-artifact@v4
