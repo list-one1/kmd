@@ -34,7 +34,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install nncase onnx onnxruntime numpy
+          pip install nncase==1.9.0.20230322 onnx onnxruntime numpy
 
       - name: Inspect model
         run: |

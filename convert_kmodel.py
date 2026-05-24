@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
-YOLO ONNX → K210 kmodel converter using nncase 2.x API.
+YOLO ONNX → K210 kmodel converter using nncase 1.x API.
+
+Requires: nncase==1.9.0.20230322 (last v1.x with K210 support)
 """
 
 import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+
 
 def convert_onnx_to_kmodel(onnx_path, kmodel_path, target="k210",
-                           input_shape=(1, 3, 224, 224), quantize=True):
-    """Convert ONNX model to K210 kmodel using nncase."""
+                           input_size=224, quantize=True):
+    """Convert ONNX model to K210 kmodel using nncase 1.x."""
     import nncase
 
     print(f"\n{'='*50}")
     print(f"  nncase {nncase.__version__}: ONNX → K210 kmodel")
     print(f"{'='*50}")
     print(f"  Target:      {target}")
-    print(f"  Input shape: {input_shape}")
+    print(f"  Input size:  {input_size}")
     print(f"  Quantize:    {'INT8' if quantize else 'FP32'}")
 
     # Read ONNX
@@ -25,40 +29,46 @@ def convert_onnx_to_kmodel(onnx_path, kmodel_path, target="k210",
         onnx_data = f.read()
     print(f"  ONNX size:   {len(onnx_data) / 1024:.1f} KB")
 
-    # Create compiler with compile options
+    # Compile options (NHWC layout for K210 KPU)
     compile_options = nncase.CompileOptions()
     compile_options.target = target
-    compile_options.input_shape = list(input_shape)
+    compile_options.input_shape = [1, input_size, input_size, 3]
+    compile_options.input_type = "float32"
+    compile_options.input_layout = "NHWC"
+    compile_options.output_layout = "NHWC"
 
     if quantize:
-        compile_options.input_type = "uint8"
-        compile_options.input_range = [0, 255]
-    else:
-        compile_options.input_type = "float32"
-        compile_options.input_range = [0, 1]
-
-    compile_options.preprocess = True
-    compile_options.input_layout = "NCHW"
-    compile_options.output_layout = "NCHW"
-    compile_options.dump_ir = False
+        compile_options.quant_type = "uint8"
 
     compiler = nncase.Compiler(compile_options)
 
-    # Import model
+    # Import ONNX
     print("\n[1/3] Importing ONNX...")
-    compiler.import_onnx(onnx_data)
+    import_options = nncase.ImportOptions()
+    compiler.import_onnx(onnx_data, import_options)
 
-    # Quantize
+    # PTQ calibration
     if quantize:
         print("[2/3] Setting up PTQ quantization...")
-        compiler.use_ptq()
+        ptq_options = nncase.PTQTensorOptions()
+        ptq_options.samples_count = 5
+
+        # Generate calibration data: [samples, H, W, C] float32
+        calib_shape = [ptq_options.samples_count, input_size, input_size, 3]
+        calib_data = np.random.rand(*calib_shape).astype(np.float32)
+        ptq_options.set_tensor_data(calib_data.tobytes())
+
+        compiler.use_ptq(ptq_options)
 
     # Compile
     print("[3/3] Compiling for K210 KPU...")
     compiler.compile()
 
     # Generate kmodel
-    code = compiler.gencode(str(kmodel_path))
+    kmodel = compiler.gencode_tobytes()
+    with open(str(kmodel_path), "wb") as f:
+        f.write(kmodel)
+
     size_kb = kmodel_path.stat().st_size / 1024
     size_mb = size_kb / 1024
 
@@ -91,7 +101,7 @@ def main():
         convert_onnx_to_kmodel(
             onnx_path, kmodel_path,
             target=args.target,
-            input_shape=(1, 3, args.input_size, args.input_size),
+            input_size=args.input_size,
             quantize=not args.no_quantize,
         )
     except Exception as e:
