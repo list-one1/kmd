@@ -8,9 +8,6 @@ on:
       - ".github/workflows/kmodel.yml"
   workflow_dispatch:
     inputs:
-      input_size:
-        description: "Input size (px)"
-        default: "215"
       quantize:
         description: "INT8 quantization"
         default: "true"
@@ -20,7 +17,7 @@ on:
 
 jobs:
   convert:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
@@ -29,44 +26,18 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.8'
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install nncase==1.9.0.20230322 onnx onnxruntime numpy onnxsim
+          pip install nncase==1.9.0.20230322 onnxsim onnx onnxruntime numpy
 
-      - name: Simplify ONNX
-        run: |
-          python3 -m onnxsim best.onnx best_sim.onnx --overwrite-input-shape "images:1,3,215,215" 2>&1 || true
-          if [ -f best_sim.onnx ]; then
-            echo "Simplified ONNX ready"
-            ls -lh best_sim.onnx
-          else
-            echo "Simplification failed, using original"
-            cp best.onnx best_sim.onnx
-          fi
-
-      - name: Debug nncase API
-        run: |
-          python3 -c "
-          import nncase
-          print(f'nncase version: {nncase.__version__}')
-          co = nncase.CompileOptions()
-          print(f'CompileOptions attrs: {[a for a in dir(co) if not a.startswith(\"_\")]}')
-          io = nncase.ImportOptions()
-          print(f'ImportOptions attrs: {[a for a in dir(io) if not a.startswith(\"_\")]}')
-          ptq = nncase.PTQTensorOptions()
-          print(f'PTQTensorOptions attrs: {[a for a in dir(ptq) if not a.startswith(\"_\")]}')
-          c = nncase.Compiler(co)
-          print(f'Compiler methods: {[m for m in dir(c) if not m.startswith(\"_\")]}')
-          print('All nncase symbols:', [s for s in dir(nncase) if not s.startswith('_')])
-          "
-
-      - name: Inspect model
+      - name: Inspect ONNX model
         run: |
           python3 -c "
           import onnx, os
+          from collections import Counter
           m = onnx.load('best.onnx')
           print(f'Size: {os.path.getsize(\"best.onnx\")/1024:.0f} KB')
           for i in m.graph.input:
@@ -75,142 +46,43 @@ jobs:
           for o in m.graph.output:
               s = [d.dim_value for d in o.type.tensor_type.shape.dim]
               print(f'Output: {o.name} shape={s}')
-          from collections import Counter
           ops = Counter([n.op_type for n in m.graph.node])
           print(f'Nodes: {len(m.graph.node)}')
           print(f'Ops: {dict(ops)}')
-          print(f'IR version: {m.ir_version}')
-          print(f'Opset: {m.opset_import[0].version}')
           "
 
-      - name: Convert to kmodel (float32)
+      - name: Convert ONNX to kmodel
         run: |
-          set -x
-          python3 -c "
-          import nncase, numpy as np, sys, traceback
+          QUANTIZE="${{ inputs.quantize || 'true' }}"
 
-          INPUT_SIZE = 215
-          ONNX = 'best_sim.onnx'
-
-          with open(ONNX, 'rb') as f:
-              onnx_data = f.read()
-          print(f'ONNX loaded: {len(onnx_data)} bytes')
-
-          # Step 1: CompileOptions
-          print('\\n[1] Creating CompileOptions...')
-          co = nncase.CompileOptions()
-          co.target = 'k210'
-          co.input_shape = [1, INPUT_SIZE, INPUT_SIZE, 3]
-          co.input_type = 'float32'
-          co.input_layout = 'NHWC'
-          co.output_layout = 'NHWC'
-          print('CompileOptions OK')
-
-          # Step 2: Compiler
-          print('\\n[2] Creating Compiler...')
-          compiler = nncase.Compiler(co)
-          print('Compiler OK')
-
-          # Step 3: Import ONNX
-          print('\\n[3] Importing ONNX...')
-          io = nncase.ImportOptions()
-          compiler.import_onnx(onnx_data, io)
-          print('Import OK')
-
-          # Step 4: Compile (no PTQ)
-          print('\\n[4] Compiling...')
-          compiler.compile()
-          print('Compile OK')
-
-          # Step 5: Generate kmodel
-          print('\\n[5] Generating kmodel...')
-          kmodel = compiler.gencode_tobytes()
-          with open('best.kmodel', 'wb') as f:
-              f.write(kmodel)
-          print(f'kmodel size: {len(kmodel)} bytes ({len(kmodel)/1024:.1f} KB)')
-          print('SUCCESS: float32 kmodel generated')
-          " 2>&1
-
-      - name: Convert to kmodel (int8 with PTQ)
-        if: success() || failure()
-        run: |
-          set -x
-          python3 -c "
-          import nncase, numpy as np, sys, traceback
-
-          INPUT_SIZE = 215
-          ONNX = 'best_sim.onnx'
-
-          with open(ONNX, 'rb') as f:
-              onnx_data = f.read()
-
-          # Step 1: CompileOptions
-          print('\\n[1] Creating CompileOptions with quant_type=uint8...')
-          co = nncase.CompileOptions()
-          co.target = 'k210'
-          co.input_shape = [1, INPUT_SIZE, INPUT_SIZE, 3]
-          co.input_type = 'float32'
-          co.input_layout = 'NHWC'
-          co.output_layout = 'NHWC'
-          co.quant_type = 'uint8'
-          print('CompileOptions OK')
-
-          # Step 2: Compiler
-          print('\\n[2] Creating Compiler...')
-          compiler = nncase.Compiler(co)
-          print('Compiler OK')
-
-          # Step 3: Import ONNX
-          print('\\n[3] Importing ONNX...')
-          io = nncase.ImportOptions()
-          compiler.import_onnx(onnx_data, io)
-          print('Import OK')
-
-          # Step 4: PTQ
-          print('\\n[4] Setting up PTQ...')
-          ptq = nncase.PTQTensorOptions()
-          ptq.samples_count = 5
-          calib = np.random.rand(5, INPUT_SIZE, INPUT_SIZE, 3).astype(np.float32)
-          ptq.set_tensor_data(calib.tobytes())
-          compiler.use_ptq(ptq)
-          print('PTQ setup OK')
-
-          # Step 5: Compile
-          print('\\n[5] Compiling...')
-          compiler.compile()
-          print('Compile OK')
-
-          # Step 6: Generate kmodel
-          print('\\n[6] Generating kmodel...')
-          kmodel = compiler.gencode_tobytes()
-          with open('best_int8.kmodel', 'wb') as f:
-              f.write(kmodel)
-          print(f'kmodel size: {len(kmodel)} bytes ({len(kmodel)/1024:.1f} KB)')
-          print('SUCCESS: INT8 kmodel generated')
-          " 2>&1
+          if [ "$QUANTIZE" = "true" ]; then
+            python convert_kmodel.py --input best.onnx --output best.kmodel --target k210
+          else
+            python convert_kmodel.py --input best.onnx --output best.kmodel --target k210 --no-quantize
+          fi
 
       - name: Verify kmodel
         run: |
-          for KMDL in best.kmodel best_int8.kmodel; do
-            if [ -f "$KMDL" ]; then
-              SIZE_BYTES=$(stat -c%s "$KMDL")
-              SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
-              echo "$KMDL: ${SIZE_BYTES} bytes (${SIZE_MB} MB)"
-              MAX_BYTES=6291456
-              if [ $SIZE_BYTES -gt $MAX_BYTES ]; then
-                echo "::warning::$KMDL ${SIZE_MB}MB exceeds 6MB limit!"
-              else
-                echo "::notice::$KMDL ${SIZE_MB}MB - within 6MB limit"
-              fi
-            else
-              echo "::warning::$KMDL not found"
-            fi
-          done
+          if [ -f best.kmodel ]; then
+            SIZE_BYTES=$(stat -c%s best.kmodel)
+            SIZE_KB=$(echo "scale=1; $SIZE_BYTES / 1024" | bc)
+            echo "kmodel: ${SIZE_BYTES} bytes (${SIZE_KB} KB)"
 
-      - name: Upload kmodel
+            MAX_BYTES=6291456
+            if [ $SIZE_BYTES -gt $MAX_BYTES ]; then
+              echo "::error::kmodel exceeds 6MB limit!"
+              exit 1
+            else
+              echo "::notice::kmodel within 6MB limit"
+            fi
+          else
+            echo "::error::kmodel not generated!"
+            exit 1
+          fi
+
+      - name: Upload kmodel artifact
         uses: actions/upload-artifact@v4
         with:
           name: kmodel-k210
-          path: |
-            best.kmodel
-            best_int8.kmodel
+          path: best.kmodel
+          retention-days: 90
